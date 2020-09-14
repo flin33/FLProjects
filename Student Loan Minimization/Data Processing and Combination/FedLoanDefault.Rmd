@@ -1,0 +1,707 @@
+---
+title: "Federal Loan Default"
+author: "BU MSBA Cohort B Team 8 (Kyle Blackburn, Fernanda Lin, Hongyang Liu, Lyufan Pan and Mansi Tolia)"
+date: "March 19, 2020"
+output: html_document
+---
+
+# Student Loan Default Rate
+
+-----
+
+# Libraries
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(data.table)
+library(corrplot)
+library(factoextra)
+library(readr)
+library(matrixStats)
+library(randomForest)
+library(DescTools)
+library(skimr)
+library(car)
+library(ridge)
+library(tibble)
+```
+  
+  
+# Load raw data
+```{r message=FALSE, warning=FALSE}
+#load
+scorecard <- readRDS("~/Desktop/cleaned_scorecard.rds")
+ipeds <- read_csv("~/Desktop/ipeds.csv")
+```
+
+
+-----
+
+
+# Cleaning
+```{r message=FALSE, warning=FALSE}
+#columns fix
+names(scorecard) <- tolower(names(scorecard))
+names(ipeds) <- tolower(names(ipeds))
+
+#merge datasets based on unitid and year
+combined <- merge(ipeds, scorecard, by = c("unitid", "year"))
+
+#separate out ACT/SAT, repayment for Tableu
+testScores <- combined %>% select(unitid, year, starts_with("act"), starts_with("sat"))
+repaymentRate <- combined %>% select(unitid, year, contains("rpy"))
+
+#combine default rates
+combined$default <- rowMeans(combined[ , c("cdr2","cdr3")], na.rm = T)
+
+#remove empty columns, duplicates, unhelpful booleans
+combined$countycd <- NULL
+combined$countynm <- NULL
+combined$locale2 <- NULL
+combined$`institution name` <- NULL
+combined$opeid <- NULL
+combined$opeid6 <- NULL
+combined$city <- NULL
+combined$grrtas <- NULL
+combined$grrtnh <- NULL
+combined$efug <- NULL
+combined$pcuenrbk <- NULL
+combined$pcuenrw <- NULL
+combined$pcuenrwh <- NULL
+combined$pcuenrhs <- NULL
+combined$aanapii <- NULL
+combined$annhi <- NULL
+combined$tribal <- NULL
+combined$hsi <- NULL
+combined$nanti <- NULL
+combined$menonly <- NULL
+combined$womenonly <- NULL
+combined$pbi <- NULL
+combined$hbcu <- NULL
+combined[,c("satnum", "satpct", "actnum", "actpct", "satvr25", "satvr75", "satmt25", "satmt75", "actcm25", "actcm75", "acten25", "acten75", "actmt25", "actmt75", "npt412", "npt422", "npt432", "npt442", "npt452")] <- NULL
+combined$cdr2 <- NULL
+combined$cdr3 <- NULL
+combined$loan_ever <- NULL
+combined$par_ed_n <- NULL
+combined$appl_sch_n <- NULL
+
+#change to decimal
+combined[, c("dvadm02", "dvadm03", "dvadm05", "dvadm06", "dvef14", "floan_p", "loan_p")] <- combined[, c("dvadm02", "dvadm03", "dvadm05", "dvadm06", "dvef14", "floan_p", "loan_p", "grrt2m", "grrtan", "grrtap", "grrtbk", "grrths", "grrtm", "grrtun", "grrtw", "grrtwh")] / 100
+
+#select out repayment
+combined <- combined %>% select(-contains("rpy"))
+
+#select columns with <= 50% NA
+combined <- combined[, which((colSums(is.na(combined)) / nrow(combined)) <= 0.5)]
+
+#to csv
+write_csv(testScores, '~/Desktop/testScores.csv')
+write_csv(repaymentRate, '~/Desktop/repayment.csv')
+write_csv(combined, '~/Desktop/combined.csv')
+```
+
+
+# Load cleaned data
+```{r message=FALSE, warning=FALSE}
+combined <- read_csv('~/Desktop/combined.csv')
+repaymentRate <- read_csv('~/Desktop/repayment.csv')
+testScores <- read_csv('~/Desktop/testScores.csv')
+```
+
+
+-----
+
+
+# Dimensionality Reduction (Kmeans on PCIPs only)
+```{r message=FALSE, warning=FALSE}
+#select only PCIPs
+combined %>% select(starts_with("pcip"), "unitid", 'year') -> pcip
+
+#filter out empty rows
+pcip <- pcip[rowSums(is.na(pcip)) != max(rowSums(is.na(pcip))), ]
+
+#kmeans -- 4clusters
+p <- pcip %>% select(-c("unitid", 'year')) %>% scale()
+k4 <- kmeans(p, centers = 4, iter.max = 25, nstart = 25)
+#fviz_cluster(k4, data = p)
+
+#check table of clusters
+#table(k4$cluster)
+
+#add cluster assignment and drop all pcip cols
+pcip$cluster <- k4$cluster
+pcip1 <- pcip %>% select(unitid, year, cluster)
+
+# merge to combined
+df_k4cluster <- inner_join(combined, pcip1, by = c("unitid", "year") )
+```
+
+
+# PCA on PCIP
+```{r}
+# # correlation matrix
+# pcip %>% 
+#   select(-unitid, -cluster) -> pcip2
+# 
+# pcip_cor <- cor(pcip2)
+# 
+# corrplot(pcip_cor, 
+#          method = "color", 
+#          type="upper", 
+#          diag=F,
+#          order = "hclust")
+# 
+# # pca
+# pcip_pca = prcomp(pcip2, center=T, scale=T)
+# fviz_screeplot(pcip_pca, addlables = T, ylim=c(0, 20))
+# get_eigenvalue(pcip_pca)
+# 
+# #visualize
+# fviz_pca_var(pcip_pca, col.var = "contrib")
+# fviz_contrib(pcip_pca, choice = "var")
+# fviz_contrib(pcip_pca, choice = "var", axes = 2)
+# fviz_contrib(pcip_pca, choice = "var", axes = 3)
+```
+
+
+------
+
+
+# Imputation - create various copies of `combined` using different imputation methods
+```{r}
+#Function: Impute column-wise median values grouped by year
+impute_by_year <- function(df, statistic){
+  
+  #select only numeric columns
+  numeric <- df %>% select_if(is.numeric)
+  
+  #calculate col-wise medians grouped by the year
+  tmp <- numeric %>%
+    group_by(year) %>%
+    summarise_at(vars(-unitid), funs(statistic(., na.rm=TRUE)))
+  
+  #pivot those bad boys
+  numeric_long <- pivot_longer(numeric, 3:tail(names(df),1))
+  tmp_long <- pivot_longer(tmp, 2:tail(names(df),1))
+  
+  #join by identifying year and name
+  joined <- left_join(numeric_long, tmp_long, by = c("year", "name"))
+  
+  #keep only filled value
+  joined$lyufan <- ifelse(is.na(joined$value.x) == T, joined$value.y, joined$value.x)
+  
+  #get rid of the old data
+  joined$value.x <- NULL
+  joined$value.y <- NULL
+  
+  #new df!
+  output <- pivot_wider(joined, names_from = name, values_from = lyufan)
+  
+  #return
+  return(output)
+}
+```
+
+
+------
+
+
+# Df Versions  
+## 1. Imputation by year without cluster
+```{r message=FALSE, warning=FALSE}
+#mean
+df_mean <- copy(combined)
+df_mean <- impute_by_year(df_mean, mean)
+df_mean <- df_mean[, colSums(is.na(df_mean)) <= 10000] #get rid of anything left that has over 10k NAs
+df_mean[is.na(df_mean)] <- 0 #empty out remaining NAs
+
+#median
+df_median <- copy(combined)
+df_median <- impute_by_year(df_median, median)
+df_median <- df_median[, colSums(is.na(df_median)) <= 10000]
+df_median[is.na(df_median)] <- 0
+
+#min
+df_min <- copy(combined)
+df_min <- impute_by_year(df_min, min)
+df_min <- df_min[, colSums(is.na(df_min)) <= 10000]
+df_min[is.na(df_min)] <- 0
+
+#max
+df_max <- copy(combined)
+df_max <- impute_by_year(df_max, max)
+df_max <- df_max[, colSums(is.na(df_max)) <= 10000]
+df_max[is.na(df_max)] <- 0
+```
+
+
+## 2. Imputation by year with cluster
+```{r message=FALSE, warning=FALSE}
+#mean
+df_mean_c <- copy(df_k4cluster)
+df_mean_c <- impute_by_year(df_mean_c, mean)
+df_mean_c <- df_mean_c[, colSums(is.na(df_mean_c)) <= 10000] #get rid of anything left that has over 10k NAs
+df_mean_c[is.na(df_mean_c)] <- 0 #empty out remaining NAs
+
+#median
+df_median_c <- copy(df_k4cluster)
+df_median_c <- impute_by_year(df_median_c, median)
+df_median_c <- df_median_c[, colSums(is.na(df_median_c)) <= 10000]
+df_median_c[is.na(df_median_c)] <- 0
+
+#min
+df_min_c <- copy(df_k4cluster)
+df_min_c <- impute_by_year(df_min_c, min)
+df_min_c <- df_min_c[, colSums(is.na(df_min_c)) <= 10000]
+df_min_c[is.na(df_min_c)] <- 0
+
+#max
+df_max_c <- copy(df_k4cluster)
+df_max_c <- impute_by_year(df_max_c, max)
+df_max_c <- df_max_c[, colSums(is.na(df_max_c)) <= 10000]
+df_max_c[is.na(df_max_c)] <- 0
+```
+
+
+## 3. NA values to 0 (scenario: university didn't report them or keep track)
+```{r}
+#school didn't report it/change default NAs to 0
+combined_zeroes <- copy(combined)
+combined_zeroes[is.na(combined_zeroes)] <- 0
+```
+
+
+## 4. Variable Specific imputation/cleaning
+```{r warning=FALSE}
+#create a copy
+combined_variable <- copy(combined)
+
+#replace booleans with probability of mean(variable)
+combined_variable$pcuenran[is.na(combined_variable$pcuenran)] <- rbinom(n=length(combined_variable$pcuenran), size=1, prob=mean(combined_variable$pcuenran, na.rm = T))
+combined_variable$pcuenrnh[is.na(combined_variable$pcuenrnh)] <- rbinom(n=length(combined_variable$pcuenrnh), size=1, prob=mean(combined_variable$pcuenrnh, na.rm = T))
+
+#default NA to zeroes
+combined_variable$default[is.na(combined_variable$default)] <- 0
+
+#replace all NA in PCIP to 0
+combined_variable[ , grep("pcip", names(combined_variable)) ][is.na(combined_variable[ ,grep("pcip", names(combined_variable))])] <- 0
+
+#no age comparison needed
+combined_variable$dvef14 <- NULL
+
+
+####################################################################################
+#median imputation
+combined_variable %>%
+  select(unitid, year, avgfacsal, cinsoff, cotsoff, debt_mdn, floan_a, 
+         floan_p, grad_debt_mdn, grrtap, grrtbk, grrths,grrtm, grrtwh, grrtw, 
+         loan_a, loan_p, stufacr) %>%
+  impute_by_year(median) -> tmp_medians
+
+#join back to combined_variable
+combined_variable %>% 
+  select(-c(names(tmp_medians)), unitid, year) %>%
+  left_join(tmp_medians, by = c("unitid", "year")) -> combined_variable_median
+####################################################################################
+#mean imputation
+combined_variable %>%
+  select(unitid, year, avgfacsal, cinsoff, cotsoff, debt_mdn, floan_a, 
+         floan_p, grad_debt_mdn, grrtap, grrtbk, grrths,grrtm, grrtwh, grrtw, 
+         loan_a, loan_p, stufacr) %>%
+  impute_by_year(mean) -> tmp_mean
+
+#join back to combined_variable
+combined_variable %>% 
+  select(-c(names(tmp_mean)), unitid, year) %>%
+  left_join(tmp_mean, by = c("unitid", "year")) -> combined_variable_mean
+####################################################################################
+```
+
+
+# Write all versions to csv
+```{r}
+dfs = list(combined_variable_mean, 
+           combined_variable_median,
+           df_median, 
+           df_mean,
+           df_min,
+           df_max,
+           df_median_c, 
+           df_mean_c,
+           df_min_c,
+           df_max_c,
+           combined_zeroes)
+dfs_names = c("combined_variable_mean", 
+           "combined_variable_median",
+           "df_median", 
+           "df_mean",
+           "df_min",
+           "df_max",
+           "df_median_c", 
+           "df_mean_c",
+           "df_min_c",
+           "df_max_c",
+           "combined_zeroes")
+
+for (i in 1:length(dfs)){
+  df <- dfs[[i]]
+  write_csv(df, paste0('~/Desktop/DFs/', dfs_names[i], '.csv'))
+}
+```
+
+
+------
+
+
+# Random Forest
+```{r}
+# Create a function that takes in a dataframe (some version of combined after imputing), runs a model (RF), and records out-of-sample MSE on a log. Trees set to default = 1, should be changed if used!
+
+rf <- function(df, trees = 1){
+  
+  set.seed(1234)
+  
+  #split into train and test
+  split_index <- sample(nrow(df), nrow(df)*0.8)
+  df_train <- df[split_index, ]
+  df_test <- df[-split_index, ]
+  
+  print("Data split successfully")
+  
+  #get rid of unnecessary columns for rf
+  cat_names <- names(df)
+  cat_names <- cat_names[!cat_names %in% c("cdr2","cdr3","unitid", "zip","stabbr","instnm", "train", "default")]
+  loopformula <- "default ~ 1"
+  
+  #create formula
+  for(name in cat_names){
+    loopformula <- paste(loopformula, "+", name, sep = '')
+  }
+  formula <- as.formula(loopformula)
+  
+  print("Formula made successfully")
+  
+  #Train/Test
+  x_train <- model.matrix(formula, df_train)[,-1]
+  y_train <- df_train$default
+  
+  x_test <- model.matrix(formula, df_test)[, -1]
+  y_test <- df_test$default
+  
+  print("Model.matrix good")
+  
+  #RF fit
+  fit_rf <- randomForest(formula,
+                         df_train,
+                         ntree=trees,
+                         do.trace=T)
+  print("tree works")
+    
+  #Plot RF fit
+  varImpPlot(fit_rf)
+  
+  print("varimp yay")
+  
+  #Predict
+  yhat_rf_train <- predict(fit_rf, df_train)
+  mse_rf <- mean((yhat_rf_train -df_train$default) ^ 2)
+  
+  yhat_rf_test <- predict(fit_rf, df_test)
+  mse_rf_test <- mean((yhat_rf_test - df_test$default) ^ 2)
+  
+  #results
+  df_name = deparse(substitute(df))
+  results = list(df_name, mse_rf, mse_rf_test)
+  return(results)
+}
+```
+
+
+# Test out rf function
+```{r}
+#initialize log
+rf_results <- data.frame(name=numeric(),
+                         mse_train=numeric(),
+                         mse_test = numeric())
+
+#loop
+for (i in 1:length(dfs)){
+  df <- dfs[[i]]
+  result = rf(df, trees = 1)
+  rf_results <- rf_results %>% add_row(name = dfs_names[i],
+                                       mse_train = result[[2]],
+                                       mse_test = result[[3]])
+}
+
+#we ended up running with 100 trees, finding that df_mean provided us with the most predictive accuracy
+```
+
+
+------
+
+
+# Get rid of outliers in `default` 
+```{r message=FALSE, warning=FALSE}
+#import clustering from Mansi work
+df_cluster <- read_csv('~/Desktop/df_alldatawithclusters.csv')
+
+#clean up names
+names(df_cluster) <- tolower(names(df_cluster))
+names(df_cluster) <- str_replace(names(df_cluster), "&", "")
+names(df_cluster) <- str_replace(names(df_cluster), " ", "_")
+names(df_cluster) <- str_replace(names(df_cluster), " ", "")
+
+#subset default rates by IQR
+df_cluster <- df_cluster[df_cluster$default <= (mean(df_cluster$default)+IQR(df_cluster$default)), ]
+
+#create version without cluster - we don't want to include this in linreg
+df_mean <- df_cluster %>% select(-cluster)
+```
+
+
+# Linear regression on df_mean
+```{r message=FALSE, warning=FALSE}
+set.seed(1234)
+
+#split 80/20
+index <- sample(1:nrow(df_mean), 0.8*nrow(df_mean))
+train <- df_mean[index, ]
+test <- df_mean[-index, ]
+
+#linear regression
+fitLin <- lm(default~., train)
+predsLinTrain <- predict(fitLin, train)
+predsLinTest <- predict(fitLin, test)
+mean((train$default-predsLinTrain)^2, na.rm = T)
+mean((test$default-predsLinTest)^2, na.rm = T)
+```
+
+# Ridge
+```{r}
+#ridge
+fitRidge <- linearRidge(default~., train)
+predsRidgeTrain <- predict(fitRidge, train)
+predsRidgeTest <- predict(fitRidge, test)
+mean((train$default-predsRidgeTrain)^2, na.rm = T)
+mean((test$default-predsRidgeTest)^2, na.rm = T)
+```
+
+# Split by time 2008-2015/2016-2017
+```{r message=FALSE, warning=FALSE}
+#split by years
+trainTime <- subset(df_mean, year>=2008 & year <= 2015)
+testTime <- subset(df_mean, year>2015)
+
+#linear regression
+fitTime <- lm(default~., trainTime)
+predsTimeTrain <- predict(fitTime, trainTime)
+predsTimeTest <- predict(fitTime, testTime)
+mean((train$default-predsTimeTrain)^2, na.rm = T)
+mean((test$default-predsTimeTest)^2, na.rm = T)
+```
+
+
+-----
+
+
+# Forward Selection
+```{r}
+#create names list
+xnames <- colnames(train)
+xnames <- xnames[!xnames %in% c("default", "unitid")]
+
+#Intercept only
+fit_fw <- lm(default ~ 1, data = train)
+
+## calculate MSE train and MSE test
+yhat_train <- predict(fit_fw, train)
+mse_train <- mean((train$default - yhat_train)^2)
+yhat_test <- predict(fit_fw, test)
+mse_test <- mean((test$default - yhat_test)^2)
+
+#create log
+log_fw <- 
+  tibble(
+    xname = "intercept",
+    model = deparse(fit_fw$call),
+    mse_train = mse_train,
+    mse_test = mse_test)
+
+xnames_fw <- xnames
+
+while (length(xnames_fw) > 0) {
+  
+  ## keep track of which is the next best variable to add
+  best_mse_train <- NA
+  best_mse_test <- NA
+  best_fit_fw <- NA
+  best_xname <- NA
+  
+  ## select the next best predictor
+  for (xname in xnames_fw) {
+    
+    ## fit a model that ads the predictor xname to the current best model
+    ## to do this you will want to use the update() command which can ad a predictor
+    ## to an existing model
+    fit_fw_tmp <- update(fit_fw, as.formula(paste0(". ~ . +", xname)))
+    
+    ## compute MSE train
+    yhat_train_tmp <- predict(fit_fw_tmp, train)
+    mse_train_tmp <- mean((train$default - yhat_train_tmp)^2, na.rm = TRUE)
+    
+    ## compute MSE test
+    yhat_test_tmp <- predict(fit_fw_tmp, test)
+    mse_test_tmp <- mean((test$default - yhat_test_tmp)^2, na.rm = TRUE)
+    
+    ## if this is the first predictor to be examined
+    ## or if this predictors yields a lower MSE than the current best
+    ## then store this predictor as the current best predictor
+    if(is.na(best_mse_test) | mse_test_tmp < best_mse_test) {
+      best_xname <- xname
+      best_fit_fw <- fit_fw_tmp
+      best_mse_train <- mse_train_tmp
+      best_mse_test <- mse_test_tmp
+    }
+  }
+  
+  ## update the log
+  log_fw <- log_fw %>% 
+    add_row(
+      xname = best_xname,
+      model = paste0(deparse(best_fit_fw$call), collapse = ""),
+      mse_train = best_mse_train,
+      mse_test = best_mse_test
+    )
+  
+  ## adopt the best model for the next iteraction
+  fit_fw <- best_fit_fw
+  
+  ## remove the current best predictor from the list of predictors
+  xnames_fw <- xnames_fw[xnames_fw != best_xname]
+}
+
+ggplot(log_fw, aes(seq_along(xname), mse_test)) +
+  geom_point() +
+  geom_line() +
+  geom_point(aes(y = mse_train), color = "blue") +
+  geom_line(aes(y = mse_train), color = "blue") +
+  scale_x_continuous("Variables", labels = log_fw$xname, breaks = seq_along(log_fw$xname)) +
+  scale_y_continuous("MSE test") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+# Only top 20 linear model on time
+```{r}
+set.seed(1234)
+
+#select top 20 (ignore intercept)
+keep <- log_fw$xname[2:21]
+
+#create formula
+loopformula <- "default ~ 1"
+for(var in keep){
+    loopformula <- paste(loopformula, "+", var, sep = '')
+  }
+formula <- as.formula(loopformula)
+
+#split 80/20
+index <- sample(1:nrow(df_mean), 0.8*nrow(df_mean))
+train <- df_cluster[index, ]
+test <- df_cluster[-index, ]
+
+#linear model
+fitTop20 <- lm(formula, train)
+predsTrain <- predict(fitTop20, train)
+predsTest <- predict(fitTop20, test)
+mean((train$default-predsTrain)^2, na.rm = T)
+mean((test$default-predsTest)^2, na.rm = T)
+
+test$preds <- predsTest
+```
+
+```{r}
+ggplot(test, aes(cluster, preds, fill = factor(cluster)))+
+  geom_boxplot()+
+  labs(title = "Default rate by cluster", x = "Cluster", y = "Default rate")+
+  theme_minimal() +
+  theme(legend.position = "none") +
+  ggsave("~/Desktop/defaultRateByCluster.png")
+
+ggplot(test, aes(preds)) +
+  geom_histogram(fill = 'gray')+
+  labs(title = "Predicted default rates", x = "Predicted", y = "Default rate")+
+  theme_minimal()+
+  ggsave("~/Desktop/defaultRateHist.png")
+
+ggplot(test, aes(preds, floan_p, col = factor(control)))+
+  geom_point()+
+  labs(title = "Default vs federal loan %", x = "Default rate", y = "% students with federal loan")+
+  theme_minimal()+
+  ggsave("~/Desktop/defaultRateFedLoan.png")
+
+ggplot(test, aes(control, fill = factor(cluster) ))+
+  geom_bar()+
+  labs(title = "University level", x = "Level", y = "Count")+
+  scale_x_continuous(breaks = c(1,2,3), labels = c("Public", "Private (non-profit)", "Private (profit)"))+
+  theme_minimal()+
+  ggsave("~/Desktop/universityLevel.png")
+
+ggplot(test, aes(grrtm, preds, col=factor(cluster))) + 
+  geom_point()
+
+ggplot(test, aes(group = control,preds, fill = factor(control) ))+
+  geom_boxplot()+
+  coord_flip()
+```
+
+
+------
+
+
+# Safety scores based on model
+```{r}
+# #save parameters
+# params <- as.data.frame(coef(fitTimeTop20))
+# params <- add_column(params, parameter = rownames(params), .before = coef(fitTime))
+# rownames(params) <- NULL
+# params <- params[params$parameter %in% keep, ]
+# names(params) <- c("params", "coef")
+# 
+# #group by school
+# grouped <- df_mean %>% 
+#   select(unitid, keep) %>%
+#   group_by(unitid) %>%
+#   summarise_each(mean)
+# 
+# #calculate safety score for each school
+# safety_log <- data.frame(unitid=numeric(),
+#                        safety = numeric())
+# 
+# for (i in 1:nrow()){
+#   #initialize
+#   safety <- 0
+#   
+#   #subset without unitid
+#   name = grouped[i,1]
+#   vec <- grouped[i,-1]
+#   vec <- pivot_longer(vec, 1:ncol(vec))
+#   tmp <- as.data.frame(cbind(data = params$coef, param = vec$value))
+#   
+#   #calculate values
+#   tmp$product <- tmp$data * tmp$param
+#   safety <- safety + sum(tmp$product)
+#   
+#   #add to log
+#   safety_log <- safety_log %>% add_row(unitid = name, safety = safety)
+# }
+# 
+# #add back to safety
+# grouped$safety <- safety_log$safety
+```
+
+------
+
+
+
+

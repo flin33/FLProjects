@@ -1,0 +1,862 @@
+---
+title: <span style="color:#c41200">Yelp Analysis</span>
+output: html_notebook
+subtitle: <span style="color:#c41200">Team 8 Notebook</span>
+---
+
+---
+
+## <span style="color:#c41200"> **Yelp Data**</span>
+
+Our dataset was released by Yelp and is a subset of their business, reviews, and user data. It contains information from 5.2 million user reviews, on 174k businesses, and across 11 metropolitan areas. In our *__previous__* project, we analyzed this data on a larger scale to find trends across different cities. In *__this__* notebook, we turn to a subset of our data that only concerns Las Vegas.
+
+## <span style="color:#c41200"> **Our Focus**</span>
+
+We define a restaurant's "success" on two variables included in the original Yelp dataset: stars (ratings out of **five**) and check-ins (analogous to "checking in" on Facebook). These metrics are both user-submitted and, while not the final word for classifying restaurants as "successful" or not, provide valuable insight to the opinions of restaurant-goers. A restaurant that continuously receives high star-ratings and lots of check-ins would ideally be in business for longer than one that lacks the same amount of user feedback.  
+
+This project concerns two important determinants of a restaurant's success - location and hours operation. Using our definition of success, we move to analyzing the location of restaurants within Las Vegas and their hours of operation.
+Building on top of our previous project, where we gave recommendations for what cuisine type to serve and attributes to have in a restaurant to be successful, for the project, we are recommending two other things to keep in mind when opening a restaurant - where to have it located and what times to keep it open.
+
+## <span style="color:#c41200"> **Research Questions**</span>
+  
+Our research questions are as follows:
+
+1) Are restaurants' success (star ratings and check-ins as a measure of success) affected by their proximity to the next most frequent business type in the same area?
+2) How do hours of operation affect the performance of a restaurant?
+
+---
+```{r echo=T, results='hide'}
+#Load required packages
+library(tidyverse)
+library(bigrquery)
+library(dplyr)
+library(ggmap)
+library(plotly)
+library(forcats)
+library(scales)
+```
+
+```{r echo=T, results='hide'}
+options(gargle_oob_default=TRUE)
+account <-'team-8-bs-770-b'
+```
+
+---
+
+### <span style="color:#c41200"> **1. Are restaurants' success (star ratings and check-ins as a measure of success) affected by their proximity to the next most frequent business type in the same area?** </span>
+
+Let's begin by running a few queries on the BigQuery server. The first table (`all_business`) is the original dataset acquired from Yelp. The `checkins` table contains all check-in data by business, identifiable through a unique business ID. The last table (`restaurant_locations`) is a derivative of the `all_business` table from our **previous** project. It contains a distribution of restaurants by location. 
+
+```{r echo=T, results='hide'}
+query<-"SELECT * FROM `team-8-bs-770-b.Yelp.Yelp_business`"
+all_business<-bq_table_download(bq_project_query(account,query))
+
+query <- "SELECT * FROM `team-8-bs-770-b.By_City.Total_checkins`"
+checkins<-bq_table_download(bq_project_query(account,query))
+
+query<-"SELECT city, total_number_of_restaurants FROM `team-8-bs-770-b.Saved_queries.chosen_cities`"
+restaurant_locations <- bq_table_download(bq_project_query(account,query))
+```
+
+Here's a quick preview of each:
+```{r}
+head(all_business, 5)
+head(checkins, 5)
+head(restaurant_locations, 5)
+```
+
+---
+
+Now let's split up the restaurants by location. In our **last** project, we found that Las Vegas had the highest concentration in the Yelp dataset. We expect to see the same distribution here!
+```{r}
+ggplot(restaurant_locations, aes(x= reorder(city,-total_number_of_restaurants), y= total_number_of_restaurants))+
+  geom_col(fill ="#c41200")+
+  labs(x = "City",
+      y="Count",
+      title = "Restaurant Distribution")+
+  theme(plot.title = element_text(hjust = 0.5),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_rect(fill = "transparent"), # bg of the panel
+        plot.background = element_rect(fill = "transparent", color = NA), # bg of the plot
+        legend.background = element_rect(fill = "transparent"), # get rid of legend bg
+        legend.box.background = element_rect(fill = "transparent") ) + # get rid of legend panel bg
+  ggsave("Plots/restaurantDistribution.png", bg = "transparent")
+```
+
+Clearly, Las Vegas (LV) wins in amount of restaurants by a significant margin. This is the basis for us choosing LV.
+
+---
+  
+#### Clean and sort data
+
+Our full Yelp dataset is massive. We only want the data that pertains to LV. Let's filter for `Las Vegas`. Additionally, we don't need all of the variables and only select what we need. To keep things **tidy**, let's narrow it down to Las Vegas.
+```{r}
+vegas <- all_business %>%
+  filter(city=="Las Vegas",
+         state=="NV")
+
+vegas %>% 
+  select(business_id, city, state, latitude, longitude, stars, review_count, is_open, categories) -> vegas
+
+#get rid of original table
+rm(all_business)
+```
+
+---
+
+From our **prior** project, we already know that `restaurants` are the most popular business type in Las Vegas. However, **this** project requires us to determine the *__next__* most popular business types in Las Vegas for comparison.  
+
+Our Yelp dataset contains a variable called `categories`, which lists the keywords or "tags" associated with their line of business. They are separated with a semicolon (";"). In order to determine the next most popular tags, we need to separate them and count the frequency of each business type.
+```{r}
+#separate all tags
+split_categories <- strsplit(vegas$categories, ";")
+
+#count frequency of each tag
+cat.freq <- as.data.frame(table(unlist(split_categories) ) )
+cat.freq<-cat.freq %>% 
+  arrange(desc(Freq))
+
+#bar chart
+lv_tag_freq<-head(cat.freq, 6)
+
+#clean up
+rm(split_categories, cat.freq)
+```
+
+Let's check the frequency!
+```{r}
+#check plot
+ggplot(lv_tag_freq) +
+  geom_col(aes(reorder(Var1,-Freq), Freq), fill ="#c41200" ) +
+  labs(title="Frequency of Top Las Vegas Businesses", 
+       x="Business Type", 
+       y="Count") +
+  theme_minimal()+
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  ggsave("Plots/businessFrequencyLV.png", bg = "transparent")
+```
+`Shopping` takes the cake! We'll use this tag for comparison going forward. 
+
+---
+
+Now it is important to categorize each business into one of the following categories: restaurant, shopping , or other.
+
+```{r}
+#restaurants only
+restaurants <- vegas[grep("Restaurant",vegas$categories),]
+restaurants$tag<-"restaurant"
+
+#other only
+other <- vegas[-grep("Restaurant",vegas$categories),]
+other$tag<-"other"
+
+#index lookup
+shopping_ind <- grep("Shopping",other$categories)
+other$tag[shopping_ind] <- "shopping"
+```
+
+Then, let's bind them all into one dataframe `vegas_sorted` for easy use and get rid of the original, uncategorized version.
+
+```{r}
+vegas_sorted <- rbind(restaurants,other)
+rm(vegas)
+```
+
+---
+
+### Raster Analysis
+
+In order to answer our first question, we have to analyze the locations of each `restaurant` and their proximities to `shopping` "hubs". Thankfully, the Yelp dataset included latitude and longitude coordinates of each business. We'll use these coordinates to create a "**raster**" grid, but more on that later. First, let's do some exploration of the positions of each point.  
+
+Let's begin by breaking down the latitude and longitude values into their own categories.
+```{r}
+#create vectors of long/lat
+frame_long <- vegas_sorted$longitude
+frame_lat <- abs(vegas_sorted$latitude) 
+```
+
+Here's a visualization:
+```{r}
+#boxplot to vizualize outliers
+ggplot(vegas_sorted, aes(x=1, y=latitude))+
+  geom_boxplot()+
+  geom_jitter(width = 0.01, alpha = 0.05, col = "#c41200")+
+  theme_minimal()+
+  theme(axis.line=element_blank(),
+        axis.text.x=element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  labs(title = "Latitude: Outliers Included",
+       y = "Latitude",
+       x = NULL)+
+  ggsave("Plots/latitudeDirty.png", bg = "transparent")
+
+ggplot(vegas_sorted, aes(x=1, y=longitude))+
+  geom_boxplot()+
+  geom_jitter(width = 0.01, alpha = 0.05, col = "#c41200")+
+  theme_minimal()+
+  theme(axis.line=element_blank(),
+        axis.text.x=element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  labs(title = "Longitude: Outliers Included",
+       y = "Longitude",
+       x = NULL)+
+  ggsave("Plots/longitudeDirty.png", bg = "transparent")
+```
+In both variables, there are some obvious outliers. They'll need to be removed for our raster analysis.  
+
+We'll only keep the observations within the inter-quartile range (IQR) to stay local within Las Vegas. The goal here is to determine the window (or `frame`) that we will use for further analysis.
+```{r}
+#indicies of long/lat within IQR to remove outliers
+ind_long <- which(frame_long >= summary(frame_long)[2] &
+                    frame_long <= summary(frame_long)[4])
+ind_lat <- which(frame_lat >= summary(frame_lat)[2] &
+                    frame_lat <= summary(frame_lat)[4])
+
+#temporary df's to determine the spread of lat/long
+frame_clean_long <- vegas_sorted[ind_long, ]
+frame_clean_lat<- vegas_sorted[ind_lat, ]
+
+#merge clean frames
+frame <- merge(frame_clean_long, frame_clean_lat)
+```
+
+Here's a visualization, outliers removed:
+```{r}
+#cleaned plots
+ggplot(frame, aes(x=1, y=longitude))+
+  geom_boxplot()+
+  geom_jitter(width = 0.01, alpha = 0.05, col = "#c41200")+
+  theme_minimal()+
+  theme(axis.line=element_blank(),
+        axis.text.x=element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  labs(title = "Longitude: Outliers Removed",
+       y = "Longitude",
+       x = NULL)+
+  ggsave("Plots/longitudeClean.png", bg = "transparent")
+
+
+ggplot(frame, aes(x=1, y=latitude))+
+  geom_boxplot()+
+  geom_jitter(width = 0.01, alpha = 0.05, col = "#c41200")+
+  theme_minimal()+
+  theme(axis.line=element_blank(),
+        axis.text.x=element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  labs(title = "Latitude: Outliers Removed",
+       y = "Latitude",
+       x = NULL)+
+  ggsave("Plots/latitudeClean.png", bg = "transparent")
+```
+**MUCH** neater.
+
+Lastly, let's add in the check-ins data to `frame` and clean everything up. 
+```{r}
+#add checkins
+frame <- merge(frame, checkins, by = "business_id", all.x = T)
+
+#clean summary
+summary(frame$latitude)
+summary(frame$longitude)
+
+#clean up
+rm(vegas_sorted, ind_long, ind_lat, frame_clean_long, frame_clean_lat, checkins)
+```
+
+---
+
+We're moving now! Let's get a preliminary look at our data!
+```{r}
+#no map
+ggplot(frame[frame$tag =="shopping" | frame$tag == "restaurant", ] , aes(x=longitude, y=latitude, col = tag))+
+  geom_point(size = 0.5)+
+  labs(title = "Las Vegas Distribution",
+       x='Longitude',
+       y='Latitude',
+       col="Business Type")+
+  theme_minimal()+
+  theme(plot.title = element_text(hjust = 0.5),
+        panel.grid.major = element_line(color = "black"))+
+  ggsave("Plots/shoppingRestaurantsMap.png", bg = "transparent")
+```
+
+Looks good. There is some obvious gridding going on here.
+What you see here is Las Vegas split up into 30 cells - and how restaurants and shopping centers are distributed around Vegas.
+Now let's see it superimposed on a Google map.
+
+```{r echo=F, results='hide'}
+register_google(key = "AIzaSyCF-GXOOH_6X9ju-NsH3PsB_Kv2E19VncA")
+```
+
+```{r}
+#with google map
+frame_rest_shop <- frame[frame$tag =="shopping" | frame$tag == "restaurant", ]
+lv_map <- get_map(location = c(lon=mean(frame_rest_shop$longitude,
+                                         na.rm = TRUE),
+                               lat=mean(frame_rest_shop$latitude,
+                                         na.rm = TRUE)),
+                  maptype = "roadmap", zoom = 14)
+
+ggmap(lv_map) +
+ geom_point(data = frame_rest_shop, 
+            aes(longitude, latitude, color = tag),
+            alpha = 0.4, size = 1)+
+  labs(title = "Las Vegas Distribution",
+       x = "Longitude",
+       y = "Latitude",
+       col = "Business Type")+
+  theme_minimal()+
+  theme(plot.title = element_text(hjust = 0.5),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  ggsave("Plots/shoppingRestaurantsGoogleMap.png", bg = "transparent")
+
+```
+Looks pretty good!  
+
+It's time to start analyzing LV restaurants' proximity to shopping hubs. This presents a small problem - what algorithm are we going to use to judge distances? Obviously, it makes little sense to judge a restaurant around in the bottom left of our frame to a shopping center in the top right. To get around this, we'll use **raster analysis**.  
+
+A "raster" is a simple way of presenting information using gradients. "Cells" are geometric shapes (typically rectangles, but sometimes others) that simply represent the **value** of that particular area by following a gradient. Pixels, like the ones on your computer and television, are a form of raster data. This is contrary to "vector" data, which is comprised of lines and points. Illustrating data in a raster format is a great method to show **distributions** of one variable across a geographic location.  
+
+The above graphs obviously follow a gridded, metropolitan pattern. We'll use raster analysis to determine where in Las Vegas the significant `shopping` hubs are, then compare `restaurant` success across the entire `frame`. This will allow us to identify patterns across proximities. 
+
+---
+
+### Analyzing individual cells within window
+
+We first need to determine where the `shopping` hubs are. We'll break Las Vegas into cells in a grid, ranging from longitudes (-115.25, -115.19) and latitudes (36.09, 36.14). This data will be fed into an empty dataframe, representing a singular variable across geographic space (raster).
+
+```{r}
+#empty dataframe
+shopping_df <- data.frame(A = integer(),
+                 B = integer(),
+                 C = integer(),
+                 D = integer(),
+                 E = integer(),
+                 F = integer())
+
+#breaks in big frame
+longitude_breaks <- list(-115.25, -115.24, -115.23, -115.22, -115.21, -115.20, -115.19)
+latitude_breaks <- list(36.14, 36.13, 36.12, 36.11, 36.10, 36.09)
+
+#create df raster of shopping center frequencies
+for (i in 1:6) {
+  for (j in 1:5){
+    
+    #temporary df of single cell [i,j]
+    tmp <- frame[frame$latitude <= latitude_breaks[[j]][1] & frame$latitude >= latitude_breaks[[j+1]][1] & 
+      frame$longitude >= longitude_breaks[[i]][1] & frame$longitude <= longitude_breaks[[i+1]][1], ]
+    
+    #filter only for shopping
+    tmp %>%
+      filter(tag == "shopping") -> tmp
+    
+    #add value to shopping_df [i,j]
+    shopping_df[j,i] <- length(tmp$business_id)
+  }
+} 
+```
+
+
+Again, for the `restaurant` distribution.
+```{r}
+#empty dataframe
+restaurant_df <- data.frame(A = integer(),
+                 B = integer(),
+                 C = integer(),
+                 D = integer(),
+                 E = integer(),
+                 F = integer())
+
+#breaks in big frame
+longitude_breaks <- list(-115.25, -115.24, -115.23, -115.22, -115.21, -115.20, -115.19)
+latitude_breaks <- list(36.14, 36.13, 36.12, 36.11, 36.10, 36.09)
+
+#create df raster of shopping center frequencies
+for (i in 1:6) {
+  for (j in 1:5){
+    
+    #temporary df of single cell [i,j]
+    tmp <- frame[frame$latitude <= latitude_breaks[[j]][1] & frame$latitude >= latitude_breaks[[j+1]][1] & 
+      frame$longitude >= longitude_breaks[[i]][1] & frame$longitude <= longitude_breaks[[i+1]][1], ]
+    
+    #filter only for shopping
+    tmp %>%
+      filter(tag == "restaurant") -> tmp
+    
+    #add value to shopping_df [i,j]
+    restaurant_df[j,i] <- length(tmp$business_id)
+  }
+} 
+```
+
+
+Once more, for the `average` star rating per cell.
+```{r}
+#empty dataframe
+stars_df <- data.frame(A = integer(),
+                 B = integer(),
+                 C = integer(),
+                 D = integer(),
+                 E = integer(),
+                 F = integer())
+
+#breaks in big frame
+longitude_breaks <- list(-115.25, -115.24, -115.23, -115.22, -115.21, -115.20, -115.19)
+latitude_breaks <- list(36.14, 36.13, 36.12, 36.11, 36.10, 36.09)
+
+#create df raster of shopping center frequencies
+for (i in 1:6) {
+  for (j in 1:5){
+    
+    #temporary df of single cell [i,j]
+    tmp <- frame[frame$latitude <= latitude_breaks[[j]][1] & frame$latitude >= latitude_breaks[[j+1]][1] & 
+      frame$longitude >= longitude_breaks[[i]][1] & frame$longitude <= longitude_breaks[[i+1]][1], ]
+    
+    #filter only for shopping
+    tmp %>%
+      filter(tag == "restaurant") -> tmp
+    
+    #add value to shopping_df [i,j]
+    stars_df[j,i] <- round(mean(tmp$stars, na.rm = T), digits=1)
+  }
+}
+```
+
+
+And lastly, for the median `check-ins` per cell count.
+```{r}
+#empty dataframe
+checkins_df <- data.frame(A = integer(),
+                 B = integer(),
+                 C = integer(),
+                 D = integer(),
+                 E = integer(),
+                 F = integer())
+
+#breaks in big frame
+longitude_breaks <- list(-115.25, -115.24, -115.23, -115.22, -115.21, -115.20, -115.19)
+latitude_breaks <- list(36.14, 36.13, 36.12, 36.11, 36.10, 36.09)
+
+#create df raster of shopping center frequencies
+for (i in 1:6) {
+  for (j in 1:5){
+    
+    #temporary df of single cell [i,j]
+    tmp <- frame[frame$latitude <= latitude_breaks[[j]][1] & frame$latitude >= latitude_breaks[[j+1]][1] & 
+      frame$longitude >= longitude_breaks[[i]][1] & frame$longitude <= longitude_breaks[[i+1]][1], ]
+    
+    #filter only for shopping
+    tmp %>%
+      filter(tag == "restaurant") -> tmp
+    
+    #add value to shopping_df [i,j]
+    checkins_df[j,i] <- median(tmp$total_checkins, na.rm = T)
+  }
+}
+```
+
+Now, let's combine all of the raster dataframes togehter by making each one "tall" instead of "wide", being sure to keep the important cell location info (A1, B2, etc). The result here will be a tibble that contains all information about each cell.
+
+```{r}
+#break down each df into cell values
+a <- list(unlist(shopping_df))
+b <- list(unlist(restaurant_df))
+c <- list(unlist(stars_df))
+d <- list(unlist(checkins_df))
+
+#assign to dataframe
+all_cells <- data.frame(cbind(a[[1]], b[[1]], c[[1]], d[[1]]))
+
+#row names to own column
+all_cells <- cbind(rownames(all_cells), all_cells)
+
+#name columns
+names(all_cells) = c('cell','shopping','restaurants','stars', 'checkins')
+
+#separate cell letter and number
+alph <- unlist(map(str_split(all_cells$cell, ''), 1))
+num <- unlist(map(str_split(all_cells$cell, ''), 2))
+
+#clean tibble
+all_cells <- cbind(alph,num,all_cells)
+all_cells <- all_cells %>%
+  select(alph, num, shopping, restaurants, stars, checkins)
+
+#Get rid of NaN
+all_cells$stars[is.nan(all_cells$stars)] <- NA
+
+rm(a,b,c,d,
+   shopping_df, restaurant_df, stars_df, checkins_df, alph, num)
+```
+
+---
+
+### Mapping raster
+Math:
+1º of latitude and longitude is approximately 69 miles of distance. Thus, 1 mile of distance is (1/69)º or `r round(1/69, 4)`º.
+
+The distances along our selected fram axes are as follows:  
+x-axis (longitude):  
+(36.09, -115.19) --> (36.09, -115.25) = approximately 5.4km  
+
+y-axis (latitude):  
+(36.09, -115.25) --> (36.14, -115.25) = approximately 5.6km  
+
+This gives our window a land-area of approximately `r 5.4*5.6` km2  
+
+Each cell is then roughly `r (5.4*5.6)/30` km2
+
+Distances calculated using Google Maps and https://www.movable-type.co.uk/scripts/latlong.html
+  
+Our data is now prepped to be mapped across a grid, displaying the gradient of each variable. Firstly, let's see how `shopping` centers are distributed across our `frame` of Las Vegas.
+```{r}
+#shopping
+ggplot(all_cells, aes(x = alph, y = rev(num), fill=shopping) ) +
+  geom_tile()+
+  labs(x='Longitude',
+       y='Latitude',
+       title = 'Vegas Shopping Distribution',
+       fill = "Shopping")+
+  scale_fill_gradient(low="white", high="red")+
+  theme_light()+
+  theme(plot.title = element_text(hjust = 0.5),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  ggsave("Plots/vegasShoppingDistributionHM.png", bg = "transparent")
+```
+This is a heatmap based on the frequency of `shopping` centers in each cell. The 5 darkest cells, namely - E3, E4, A4, C2, C4 - are the cells/areas of LV which have the highest concentration of shopping businesses. Thus, we consider these 5 cells to be the `shopping hubs` of Las Vegas.
+ 
+  
+Now let's see the `restaurant` distribution:
+```{r}
+#restaurants
+ggplot(all_cells, aes(x = alph, y = rev(num), fill=restaurants)) +
+  geom_tile()+
+  labs(x='Longitude',
+       y='Latitude',
+       title = 'Vegas Restaurant Distribution',
+       fill = "Restaurant")+
+  scale_fill_gradient(low="white", high="red")+
+  theme_light()+
+  theme(plot.title = element_text(hjust = 0.5),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  ggsave("Plots/vegasRestaurantDistributionHM.png", bg = "transparent")
+```
+
+
+Similarly, the 5 darkest cells, namely - E4, E3, D4, C4, F4 - are the cells/areas of LV which have the highest concentration of `restauarnt` businesses.
+
+
+However, just looking at the frequency is not enough. We also want to see how a restaurant performs in relation to its proximity to a shopping hub.
+
+We evaluate the success of these `restaurants` based on the definition we came up with (`stars` and `checkins`).
+
+Let's have a look at the distribution of average `Stars` below:
+```{r}
+#stars
+ggplot(all_cells, aes(x = alph, y = rev(num), fill=stars)) +
+  geom_tile()+
+  labs(x='Longitude',
+       y='Latitude',
+       title = 'Vegas Star Distribution',
+       fill = "Star")+
+  scale_fill_gradient(low="white", high="red", na.value = "white")+
+  theme_light()+
+  theme(plot.title = element_text(hjust = 0.5),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  ggsave("Plots/vegasStarDistributionHM.png", bg = "transparent")
+```
+For `stars` greatest to lowest: F2, F1, A5, D2, A1. These are the top five areas with restaurants demonstrating the highest star averages.  
+  
+Again, for `checkins`:
+```{r}
+#checkins
+ggplot(all_cells, aes(x = alph, y = rev(num), fill=checkins)) +
+  geom_tile()+
+  labs(x='Longitude',
+       y='Latitude',
+       title = 'Vegas Checkin Distribution',
+       fill = "Checkins")+
+  scale_fill_gradient(low="white", high="red", na.value = "white")+
+  theme_light()+
+  theme(plot.title = element_text(hjust = 0.5),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  ggsave("Plots/vegasCheckinDistributionHM.png", bg = "transparent")
+
+```
+For `checkins` greatest to lowest: F5, A5, A1, F3, E2. These are the top five areas with restaurants demonstrating the highest checkin median.  
+  
+There are some obvious groupings between `restaurants` and `shopping` hubs. It seems that the middle right side (column E) tends to see a lot of action. On the other hand, cells with high mean star values and median checkins are more dispersed across the `frame`. Next let's see some scatter plots to explore the relationship between these variables in another way.  
+
+---
+
+First let's see `shopping` hubs vs restaurants. From the heatmaps, both variables followed a similar pattern.
+```{r}
+ggplot(all_cells, aes(shopping, restaurants))+
+  geom_point()+
+  geom_smooth(se = F, method = "lm", col = "#c41200")+
+  theme_minimal()+
+  labs(title = "Shopping Vs. Restaurants",
+       x = "Shopping",
+       y = "Restaurants")+
+  theme(plot.title = element_text(hjust = 0.5),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.line = element_line(colour = "black"))+
+  ggsave("Plots/shoppingVsRestaurants.png", bg = "transparent")
+```
+The plot shows a positive relationship between number of `restaurants` and `shopping` hubs **by cell** within our window, which we are not surprised to see.  
+  
+Now let's view the relationship between `shopping` hubs and average `star` ratings by cell:
+```{r}
+
+ggplot(all_cells, aes(shopping, stars))+
+  geom_point()+
+  geom_smooth(se = F, method = "lm", col = "#c41200")+
+  theme_minimal()+
+  labs(title = "Shopping Vs. Stars",
+       x = "Shopping",
+       y = "Stars")+
+  theme(plot.title = element_text(hjust = 0.5),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.line = element_line(colour = "black"))+
+  ggsave("Plots/shoppingVsStars.png", bg = "transparent")
+```
+There is a slightly negative trend here! It is not incredibly strong (given our small amount of data) but does beg the question - what if being by a `shopping` hub has a negative impact on `star` rating?  
+  
+  
+Let's see what happens with `checkins`!
+```{r}
+ggplot(all_cells, aes(shopping, checkins))+
+  geom_point()+
+  geom_smooth(se = F, method = "lm", col = "#c41200")+
+  theme_minimal()+
+  labs(title = "Shopping Vs. Checkins",
+       x = "Shopping",
+       y = "Checkins")+
+  theme(plot.title = element_text(hjust = 0.5),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.line = element_line(colour = "black"))+
+  ggsave("Plots/shoppingVsCheckins.png", bg = "transparent")
+
+```
+The same negative trend is exhibited here. We did not expect to see this.  
+
+For discussion, it is worth noting that our dataset is not large enough to draw strong conlcusions here. Though we removed the larger outliers in a previous step, it is likely that there are cells (data points) here that are imposing large influence on the linear model. We acknowledge this, but still find our conclusions interesting. Moving forward, a better way to perform this analysis would be to use a *k-means* clustering technique across the geographic area. 
+
+---
+
+### <span style="color:#c41200"> **2. How do hours of operation affect the performance of a restaurant?** </span>
+
+Now we want to analyze the hours of operation of the most popular business in the most popular city. To start off, we want to load the necessary table. We used the yelp_checkins table. Here is an overview:
+
+```{r echo=T, results='hide'}
+unzip("yelp_checkin.csv.zip")
+yelp_checkins<- read_csv("yelp_checkin.csv")
+head(yelp_checkins)
+```
+
+---
+
+Since the original `Restaurants` table has extra data that will not be used to answer the second question, we want to clean it and save it as a new table `narrow_restaurant`. This table contains the business_ids and their respective star ratings only. Here it is:
+```{r}
+narrow_restaurant<-select(restaurants,business_id,stars)
+```
+
+---
+
+Now we want to calculate the total number of check-ins per day for each restaurant so we spread the hours into different columns and merge this data by merging it with the `narrow_restaurant` table. This allows us to choose only the restaurants in Las Vegas. We will add the total number of check ins in the next step.
+```{r}
+hour_checkins <- spread(yelp_checkins, hour, checkins)
+hourly_checkins <- merge(narrow_restaurant,hour_checkins,
+                         by="business_id",all.x = T)
+```
+
+---
+
+Let's add up the check-ins for each day for each of the businesses and name it daily_checkins:
+```{r}
+daily_checkins <- transmute(hour_checkins, business_id, weekday,
+                            day_checkins = rowSums(hour_checkins[ ,3:26],
+                                                   na.rm = TRUE),  )
+```
+
+---
+
+Now we want to determine what are the days of the week so that we can organize them later. Let's do that.
+```{r}
+#Organizing days of the week
+week<-c("Mon","Tue","Wed","Thu","Fri","Sat","Sun")
+```
+
+---
+
+Here we factored the days of the week, so that the information would remain ordered.
+```{r}
+daily_checkins$weekday<-factor(daily_checkins$weekday,levels = week)
+week_check_in<-merge(narrow_restaurant,
+                     daily_checkins ,
+                     by="business_id",
+                     all.x = T)
+```
+
+---
+
+We grouped the restaurants by the average star ratings. The `star_division` below defines the group which each star rating belongs to. Then we use this to create a new column for the `week_check_in` table.
+```{r}
+star_division<-c(0,1,2,3,4,5)
+cut<-cut(week_check_in$stars,star_division)
+week_check_in<-mutate(week_check_in,cut)
+```
+
+---
+
+To compare the number of `check-ins` per day we create a bar chart illustrating the total number of checkins for all restaurants in Las Vegas for each week day. Then we break each of these down by the number of stars. We do this by assigning each cut a different color. Let's see that below.
+```{r}
+ggplot(week_check_in %>%
+                   drop_na(weekday) %>%
+                   group_by(weekday,cut) %>%
+                   summarize_at("day_checkins",sum,na.rm=T),
+                 aes(weekday,day_checkins,fill=cut)) +
+            geom_bar(stat="identity", na.rm=TRUE)+
+            scale_y_continuous(labels = comma)+
+  scale_fill_brewer(palette = "Blues")+
+            labs(title = "Check-ins per day",
+                 x="Day",
+                 y="Checkin",
+                 fill = "Star Rating")+
+            theme_minimal()+
+            theme(plot.title = element_text(hjust = 0.5),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(size=8, angle=45, hjust=1))+
+            ggsave("Plots/checkinsPerDay.png", bg = "transparent")
+```
+
+
+---
+
+After looking at the previous chart we want to obtain accurate total number of checkins for each of the days of the week. So we want to add up the total number of check-ins for each day. Let's do thaty below.
+```{r}
+perday_checkin<-week_check_in %>% 
+  spread(weekday, day_checkins) %>% 
+  select(1:10)
+total_checkins_perday<-colSums(perday_checkin[ ,4:10],na.rm = T)
+```
+We want to select then most popular day in our data set. Let's do that!
+
+```{r}
+week_max_checkin<-total_checkins_perday[(which.max(
+  total_checkins_perday[names(total_checkins_perday) %in% week]))]
+
+popular_day<-names(week_max_checkin)
+```
+Now, we know that Sunday happens to be the most popular day of the week for restaurants on average.
+Based on this analysis, we conclude that Sunday is the most popular day for restaurant checkins. With a total of: 654158.
+
+---
+
+Now that we have discoveres which is the most popular day of the week we want to observe which are the most popular hours for people to visit restaurants. So we use the `yelp_checkins` table again and add their respective star rating and cut (star rating group), to the table. We do this be joining `yelp_checkins` and the `narrow_restaurant` table. Let's also factor the days of the week so tha data remains in order. We also want the hours to remain in a `%H:%M:%S` format. 
+```{r}
+all_checkins<-merge(narrow_restaurant,yelp_checkins,
+                    by="business_id",
+                    all.x = T) %>%
+                    mutate(cut=cut(stars,star_division))
+
+all_checkins$weekday<-factor(all_checkins$weekday, levels = week)
+all_checkins$hour<-format(all_checkins$hour, format = "%H:%M:%S")
+```
+
+---
+
+We decided to zoom in on Sunday and break down the check-ins by each hour. 
+```{r}
+checkin_time <- spread(yelp_checkins, weekday, checkins)
+checkin_time<-merge(narrow_restaurant,checkin_time,
+                    by="business_id",all.x = T)
+hour_cut<-cut(checkin_time$stars,star_division)
+popweekday_hours<-mutate(select(checkin_time,business_id,stars,hour,popular_day), hour_cut)
+```
+
+---
+
+Let's compare the hourly checkins on the most popular day:
+```{r}
+ggplot(popweekday_hours %>%
+                  group_by(hour,hour_cut) %>%
+                  summarize_at(popular_day,sum,na.rm=T),
+                aes(hour,Sun,fill=hour_cut)) +
+           geom_bar(stat="identity",na.rm=TRUE)+
+           scale_y_continuous(labels = comma)+
+          scale_fill_brewer(palette = "Blues")+
+          labs(fill = "Stars",
+               title = "Hourly Checkins (Sunday)",
+               y = "Count",
+               x = "Hour")+
+          theme_minimal()+
+          theme(plot.title = element_text(hjust = 0.5),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          axis.text.x = element_text(size=8, angle=45, hjust=1))+
+          ggsave("Plots/hourlyCheckins.png", , height = 7, width = 14, bg = "transparent")
+```
+
+This chart illustrates a bimodal distribution between hourly checkins and time on Sunday (most popular day for checkins). The first peak is around 3:00 AM and the second at 8:00 PM, with the minimum around 1:00 PM. 
+
+
+Now let's look at how hours of operation affect the star ratings of restaurants:
+```{r}
+ggplot(popweekday_hours %>%
+          group_by(hour,hour_cut) %>%
+            summarize_at(popular_day,sum,na.rm=T),
+       aes(hour,Sun,fill=hour_cut)) +
+  geom_bar(stat="identity", fill="#3d85c6ff", na.rm=TRUE)+
+  facet_wrap(~hour_cut, nrow =1, 
+             labeller = labeller(hour_cut = c("(0,1]" = "0-1 Stars",
+                                              "(1,2]" = "1-2 Stars",
+                                              "(2,3]" = "2-3 Stars",
+                                              "(3,4]" = "3-4 Stars",
+                                              "(4,5]" = "4-5 Stars")))+
+  labs(fill = "Stars",
+       title = "Star distribution per hour (Sunday)",
+       y = "Count",
+       x = "Hour")+
+  theme_bw()+
+  theme(plot.title = element_text(hjust = 0.5),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.title = element_blank(),
+        legend.position = "none",
+        axis.text.x = element_text(size=5, angle=45, hjust=1))+
+  ggsave("Plots/checkinsSunday.png", height = 7, width = 14, bg = "transparent")
+```
+
+This charts shows that most of the high ratings (3-5 stars) occur either very early in the morning or late evening/early night.
+
+---
+
+### <span style="color:#c41200">**RECOMMENDATIONS**<span>
+ 
+1. The location of the restaurant should be at least 1 km away from a shopping hub.
+
+
+2. The restaurant should definitely be open on weekends (especially Sunday) very early in the morning and late at night.
